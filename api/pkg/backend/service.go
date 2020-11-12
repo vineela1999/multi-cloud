@@ -212,7 +212,7 @@ func (s *APIService) CreateBackend(request *restful.Request, response *restful.R
 	_, foundType := typeExists(storageTypes.Types, backendDetail.Type)
 	if !foundType {
 		fmt.Println("Backend Type not found")
-		log.Errorf("failed to retrieve storage type: %v\n", err)
+		log.Errorf("Failed to retrieve backend type: %v\n", err)
 		response.WriteError(http.StatusBadRequest, err)
 		return
 	}
@@ -381,7 +381,7 @@ func (s *APIService) listStorageType(ctx context.Context,request *restful.Reques
 
         storageTypes, err := s.backendClient.ListType(ctx,listTypeRequest)
         if err != nil {
-                log.Errorf("failed to list types: %v\n", err)
+                log.Errorf("Failed to list types: %v\n", err)
                 response.WriteError(http.StatusInternalServerError, err)
                 return nil,err
         }
