@@ -197,7 +197,7 @@ func (s *APIService) CreateBackend(request *restful.Request, response *restful.R
 	backendDetail := &backend.BackendDetail{}
 	err := request.ReadEntity(&backendDetail)
 	if err != nil {
-		log.Errorf("failed to read request body: %v\n", err)
+		log.Errorf("Failed to read request body: %v\n", err)
 		response.WriteError(http.StatusInternalServerError, err)
 		return
 	}
