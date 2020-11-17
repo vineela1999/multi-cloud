@@ -1,29 +1,17 @@
-// Copyright 2019 The OpenSDS Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-package backend
+gckage backend
 
 import (
 	"errors"
 	"net/http"
 	"strconv"
-
 	"github.com/emicklei/go-restful"
 	"github.com/micro/go-micro/v2/client"
 	"github.com/opensds/multi-cloud/api/pkg/common"
 	c "github.com/opensds/multi-cloud/api/pkg/context"
+	"github.com/opensds/multi-cloud/api/pkg/filters/signature/credentials/keystonecredentials"
 	"github.com/opensds/multi-cloud/api/pkg/policy"
+	"github.com/opensds/multi-cloud/api/pkg/utils/cryptography"
 	"github.com/opensds/multi-cloud/backend/proto"
 	"github.com/opensds/multi-cloud/dataflow/proto"
 	. "github.com/opensds/multi-cloud/s3/pkg/exception"
@@ -42,6 +30,16 @@ type APIService struct {
 	backendClient  backend.BackendService
 	s3Client       s3.S3Service
 	dataflowClient dataflow.DataFlowService
+}
+
+type EnCrypter struct {
+	Algo      string `json:"algo,omitempty"`
+	Access    string `json:"access,omitempty"`
+	PlainText string `json:"plaintext,omitempty"`
+}
+
+type DeCrypter struct {
+	CipherText string `json:"ciphertext,omitempty"`
 }
 
 func NewAPIService(c client.Client) *APIService {
@@ -166,7 +164,7 @@ func (s *APIService) ListBackend(request *restful.Request, response *restful.Res
 	if para != "" { //List those backends which support the specific tier.
 		tier, err := strconv.Atoi(para)
 		if err != nil {
-			log.Errorf("list backends with tier as filter, but tier[%s] is invalid\n", tier)
+			log.Errorf("list backends with tier as filter, but tier[%v] is invalid\n", tier)
 			response.WriteError(http.StatusBadRequest, errors.New("invalid tier"))
 			return
 		}
@@ -180,11 +178,11 @@ func (s *APIService) CreateBackend(request *restful.Request, response *restful.R
 	if !policy.Authorize(request, response, "backend:create") {
 		return
 	}
-	log.Info("Received request for creating backend.")
+	log.Info("Received request for creating backend")
 	backendDetail := &backend.BackendDetail{}
 	err := request.ReadEntity(&backendDetail)
 	if err != nil {
-		log.Errorf("failed to read request body: %v\n", err)
+		log.Errorf("Failed to read request body: %v\n", err)
 		response.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -193,15 +191,33 @@ func (s *APIService) CreateBackend(request *restful.Request, response *restful.R
 	actx := request.Attribute(c.KContext).(*c.Context)
 	backendDetail.TenantId = actx.TenantId
 	backendDetail.UserId = actx.UserId
+
+	storageTypes,_:= s.listStorageType(ctx,request,response)
+
+	_, foundType := typeExists(storageTypes.Types, backendDetail.Type)
+	if !foundType {
+		log.Errorf("Failed to retrieve backend type: %v\n", err)
+		response.WriteError(http.StatusBadRequest, err)
+		return
+	}
 	res, err := s.backendClient.CreateBackend(ctx, &backend.CreateBackendRequest{Backend: backendDetail})
 	if err != nil {
-		log.Errorf("failed to create backend: %v\n", err)
+		log.Errorf("Failed to create backend: %v\n", err)
 		response.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	log.Info("Create backend successfully.")
+	log.Info("Created backend successfully.")
 	response.WriteEntity(res.Backend)
+}
+
+func typeExists(slice []*backend.TypeDetail, inputType string) (int, bool) {
+	for i, item := range slice {
+		if item.Name == inputType {
+			return i, true
+		}
+	}
+	return -1, false
 }
 
 func (s *APIService) UpdateBackend(request *restful.Request, response *restful.Response) {
@@ -277,44 +293,82 @@ func (s *APIService) ListType(request *restful.Request, response *restful.Respon
 	if !policy.Authorize(request, response, "type:list") {
 		return
 	}
-	log.Info("Received request for backend type list.")
-	listTypeRequest := &backend.ListTypeRequest{}
-
-	limit, offset, err := common.GetPaginationParam(request)
-	if err != nil {
-		log.Errorf("get pagination parameters failed: %v\n", err)
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-	listTypeRequest.Limit = limit
-	listTypeRequest.Offset = offset
-
-	sortKeys, sortDirs, err := common.GetSortParam(request)
-	if err != nil {
-		log.Errorf("get sort parameters failed: %v\n", err)
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-	listTypeRequest.SortKeys = sortKeys
-	listTypeRequest.SortDirs = sortDirs
-
-	filterOpts := []string{"name"}
-	filter, err := common.GetFilter(request, filterOpts)
-	if err != nil {
-		log.Errorf("get filter failed: %v\n", err)
-		response.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-	listTypeRequest.Filter = filter
-
+	log.Info("Received request for backends type list.")
 	ctx := context.Background()
-	res, err := s.backendClient.ListType(ctx, listTypeRequest)
+	storageTypes,_:=s.listStorageType(ctx,request,response)
+	log.Info("List types successfully.")
+	response.WriteEntity(storageTypes)
+}
+
+
+func (s *APIService) EncryptData(request *restful.Request, response *restful.Response) {
+	if !policy.Authorize(request, response, "backend:encrypt") {
+		return
+	}
+	log.Info("Received request for encrypting data.")
+	encrypter := &EnCrypter{}
+	err := request.ReadEntity(&encrypter)
 	if err != nil {
-		log.Errorf("failed to list types: %v\n", err)
+		log.Errorf("failed to read request body: %v\n", err)
 		response.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	log.Info("List types successfully.")
-	response.WriteEntity(res)
+	credential, err := keystonecredentials.NewCredentialsClient(encrypter.Access).Get()
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	aes := cryptography.NewSymmetricKeyEncrypter(encrypter.Algo)
+	cipherText, err := aes.Encrypter(encrypter.PlainText, []byte(credential.SecretAccessKey))
+	if err != nil {
+		log.Error(err)
+		return
+	}
+
+	log.Info("Encrypt data successfully.")
+	response.WriteEntity(DeCrypter{CipherText: cipherText})
 }
+
+
+func (s *APIService) listStorageType(ctx context.Context,request *restful.Request, response *restful.Response)(* backend.ListTypeResponse,error){
+        listTypeRequest := &backend.ListTypeRequest{}
+
+        limit, offset, err := common.GetPaginationParam(request)
+        if err != nil {
+                log.Errorf("get pagination parameters failed: %v\n", err)
+                response.WriteError(http.StatusInternalServerError, err)
+                return nil,err
+        }
+        listTypeRequest.Limit = limit
+        listTypeRequest.Offset = offset
+
+        sortKeys, sortDirs, err := common.GetSortParam(request)
+        if err != nil {
+                log.Errorf("get sort parameters failed: %v\n", err)
+                response.WriteError(http.StatusInternalServerError, err)
+                return nil,err
+        }
+        listTypeRequest.SortKeys = sortKeys
+        listTypeRequest.SortDirs = sortDirs
+
+        filterOpts := []string{"name"}
+        filter, err := common.GetFilter(request, filterOpts)
+        if err != nil {
+                log.Errorf("get filter failed: %v\n", err)
+                response.WriteError(http.StatusInternalServerError, err)
+                return nil,err
+        }
+        listTypeRequest.Filter = filter
+
+        storageTypes, err := s.backendClient.ListType(ctx,listTypeRequest)
+        if err != nil {
+                log.Errorf("Failed to list types: %v\n", err)
+                response.WriteError(http.StatusInternalServerError, err)
+                return nil,err
+        }
+	return storageTypes,nil
+}
+
+elato_image_tag: "{{ release_version }}"
