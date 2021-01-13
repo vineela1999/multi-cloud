@@ -224,7 +224,7 @@ func (s *APIService) CreateBackend(request *restful.Request, response *restful.R
 		return
 	}
 
-	log.Info("Created backend successfully.")
+	log.Info("Created backend successfully..")
 	response.WriteEntity(res.Backend)
 }
 
